@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>BabeChat → Tistory 변환기 (최종본)</title>
+<style>
+/* ===== 기본 스타일 ===== */
+body{
+  font-family:Pretendard, 'Noto Sans KR',sans-serif;
+  background:#fafafa;
+  padding:24px;
+  color:#111;
+}
+.app{
+  max-width:980px;
+  margin:0 auto;
+  background:#fff;
+  border-radius:12px;
+  padding:20px;
+  box-shadow:0 6px 18px rgba(0,0,0,0.06);
+}
+/* 텍스트 입력 및 출력 영역 */
+textarea{
+  width:100%;
+  min-height:180px;
+  padding:12px;
+  border-radius:8px;
+  border:1px solid #ddd;
+  font-family:monospace;
+  resize:vertical;
+}
+input[type="text"]{
+  padding:8px;
+  border-radius:8px;
+  border:1px solid #ddd;
+}
+button{
+  background:#B56576;
+  color:#fff;
+  border:0;
+  padding:8px 12px;
+  border-radius:8px;
+  cursor:pointer;
+  font-weight:600;
+}
+.small{font-size:0.9rem;margin-left:8px;color:#666}
+.notice{color:#2a7a2a;display:none;margin-top:10px}
+</style>
+</head>
+
+<body>
+<div class="app">
+  <h2>💬 BabeChat → Tistory HTML 변환기 (최종)</h2>
+  <p>사용법: 유저 이름 입력 → TXT 붙여넣기 or 파일 업로드 → 변환 → 복사 → 티스토리 HTML 모드에 붙여넣기</p>
+
+  <!-- 입력창 및 버튼 영역 -->
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+    <label style="font-weight:600">유저 이름</label>
+    <input id="userName" type="text" placeholder="예: 나 또는 플레이어" style="width:220px" />
+    <input id="file" type="file" accept=".txt" />
+    <button id="loadSample">샘플삽입</button>
+    <button id="convert">변환</button>
+    <button id="copyBtn">복사 (클립보드)</button>
+    <span class="notice" id="copyNotice">복사되었습니다 ✅</span>
+  </div>
+
+  <!-- 입력 TXT -->
+  <label style="font-weight:600">원본 TXT</label>
+  <textarea id="txt" placeholder="BabeChat TXT 내용을 붙여넣거나 파일 업로드하세요."></textarea>
+
+  <!-- 미리보기 -->
+  <h3 style="margin-top:16px">미리보기 (티스토리에 붙여넣을 HTML)</h3>
+  <div id="previewWrap" style="background:#fbfbfb;border:1px dashed #eee;padding:12px;border-radius:8px;min-height:120px"></div>
+
+  <!-- 최종 HTML -->
+  <h3 style="margin-top:16px">생성된 HTML (티스토리 HTML 모드에 붙여넣기)</h3>
+  <textarea id="outHtml" style="min-height:160px"></textarea>
+</div>
+<script>
+/* ===================== 유틸리티 함수 ===================== */
+function escapeHtml(s){
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+function removeImageFilenames(s){
+  return s
+    .replace(/\b[\w-]+\.(?:png|jpe?g|webp|gif)\b/gi,'')
+    .replace(/^\s*img:\S+\s*$/gmi,'');
+}
+function removeLeadingDatetime(s){
+  return s.replace(/^\s*\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*[^,]*,\s*/,'');
+
+}
+const patternBabe = /^(\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*[^,]+?),\s*(.+?)\s*:\s*(.*)$/;
+const patternSimple = /^(.+?)\s*:\s*(.*)$/;
+
+// ------- Markdown 테이블 → HTML 변환 함수 -------
+function convertMarkdownTableToHtml(text){
+  const lines = text.split('\n');
+  let inTable = false;
+  let html = [];
+  let headerCells = [];
+
+  for(let i = 0; i < lines.length; i++){
+    const line = lines[i].trim();
+    if(!line) continue;
+
+    if(line.startsWith('|') && line.endsWith('|')){
+      const cells = line.slice(1, -1).split('|').map(c => c.trim());
+
+      if(!inTable){
+        html.push('<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse; width:100%; text-align:center;">');
+        headerCells = cells;
+        html.push('<thead><tr>' + cells.map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr></thead><tbody>');
+        inTable = true;
+      } else {
+        if(!/^[-:| ]+$/.test(line)){
+        html.push('<tr>' + cells.map((c, idx) => {
+            const align = headerCells[idx] && headerCells[idx].includes('(글 제목)') ? 'left' : 'center';
+            return `<td style="text-align:${align}">${escapeHtml(c)}</td>`;
+          }).join('') + '</tr>');
+        }
+      }
+
+    } else {
+      if(inTable){
+        html.push('</tbody></table>');
+        inTable = false;
+      }
+      html.push(line);
+    }
+  }
+
+  if(inTable) html.push('</tbody></table>');
+
+  return html.join('\n');
+}
+
+/* ==================== TXT 파싱 ==================== */
+function autoCloseInfoBlocks(lines, userName){
+  const newLines = [];
+  let inInfo = false;
+
+  for(let i=0; i<lines.length; i++){
+    let line = lines[i];
+
+    if(/^```INFO/.test(line)) {
+      inInfo = true;
+      newLines.push(line);
+      continue;
+    }
+
+    if(inInfo){
+      newLines.push(line);
+      const nextLine = lines[i+1] || '';
+      const m = nextLine.match(/^(\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*[^,]+?),\s*(.+?)\s*:\s*(.*)$/);
+
+      if(m && m[2].trim() === userName){
+        if(line.trim() !== '```' && !line.trim().startsWith('[모드]:') && nextLine.trim() !== '```'){
+          newLines.push('```');
+        }
+        inInfo = false;
+      } else if(i === lines.length - 1){
+        if(line.trim() !== '```' && !line.trim().startsWith('[모드]:')){
+          newLines.push('```');
+        }
+        inInfo = false;
+      }
+      continue;
+    }
+
+    newLines.push(line);
+  }
+  return newLines;
+}
+
+function parseTxtToItems(raw){
+  const lines = raw.replace(/\r/g,'').split('\n');
+  const items = [];
+  let inInfo = false;
+  let infoBuf = [];
+  let lastSender = null;
+  let textBuffer = [];
+
+  const flushBuffer = () => {
+    if (lastSender && textBuffer.length > 0) {
+      items.push({ type:'chat', sender:lastSender, text: textBuffer.join('\n') });
+      textBuffer = [];
+    }
+  };
+
+  for(let i = 0; i < lines.length; i++){
+    let line = lines[i].trim();
+    if(!line) continue;
+    if(/^\s*img:\S+/i.test(line)) continue;
+
+    if(/^```INFO/.test(line)){
+      flushBuffer();
+      inInfo = true;
+      infoBuf = [];
+      continue;
+    }
+
+    if(inInfo){
+      if(line === '```' || /^\[모드\]:/.test(line)){
+          flushBuffer();
+          items.push({ type:'info', text: infoBuf.join('\n') });
+          inInfo = false;
+          infoBuf = [];
+          continue;
+        } else {
+          infoBuf.push(line);
+          continue;
+        }
+    }
+
+    if(line.startsWith('|') && line.endsWith('|')){
+      flushBuffer();
+      let tableLines = [line];
+      let j = i + 1;
+      while(j < lines.length){
+        const nextLine = lines[j].trim();
+        if(nextLine.startsWith('|') && nextLine.endsWith('|')){
+          tableLines.push(nextLine);
+          j++;
+        } else break;
+      }
+      items.push({ type:'chat', sender:lastSender, text: tableLines.join('\n') });
+      i = j - 1;
+      continue;
+    } 
+
+    let m = line.match(patternBabe);
+    if(m){
+      flushBuffer();
+      lastSender = m[2].trim() || lastSender;
+      textBuffer.push(m[3].trim());
+      continue;
+    }
+
+    m = line.match(patternSimple);
+    if(m){
+      flushBuffer();
+      lastSender = m[1].trim();
+      textBuffer.push(m[2].trim());
+      continue;
+    }
+
+    if(line === '```'){ continue; }
+
+    if(lastSender){
+      textBuffer.push(line);
+    } else {
+      flushBuffer();
+      items.push({ type:'text', text: line });
+    }
+  }
+
+  flushBuffer();
+  return items;
+}
+
+/* ==================== HTML 생성 ==================== */
+function formatParagraph(text){
+  const lines = text.split('\n');
+  let inTable = false;
+  const out = [];
+
+  for(let line of lines){
+    line = line.trim();
+    if(!line) continue;
+
+    if(line.startsWith('|') && line.endsWith('|')){
+      inTable = true;
+      out.push(line);
+      continue;
+    }
+
+    if(inTable && !line.startsWith('|')){
+      inTable = false;
+    }
+
+    if(/^[가-힣A-Za-z0-9]+:\s*["“”]/.test(line)){
+      out.push(`<p style="margin:5px 0; font-weight:600; color:#F6C177;">${line}</p>`);
+    } else if(!inTable){
+      out.push(`<p style="margin:4px 0;">${line}</p>`);
+    } else {
+      out.push(line);
+    }
+  }
+
+  return out.join('\n');
+}
+
+function buildInlineHtml(items,userName){
+  const out=[];  
+  const wrapperStyle='font-family:Pretendard, Noto Sans KR, sans-serif; background:#181818; padding:12px;';
+  out.push(`<div style="${wrapperStyle}">`);
+
+  let botBuffer=[];
+
+  const flushBotBuffer=()=>{ 
+    if(botBuffer.length===0) return;
+    let text = botBuffer.join('\n');
+    text = formatParagraph(text);
+    text = convertMarkdownTableToHtml(text);
+    const bubbleStyle='padding:12px 14px;border-radius:14px;white-space:pre-wrap;word-break:break-word;line-height:1.6;max-width:82%;box-shadow:0 2px 6px rgba(0,0,0,0.45);background:#2b2b2b;color:#eaeaea;border-top-left-radius:0;';
+    out.push(`<div style="display:flex;justify-content:flex-start;margin:10px 0;"><div class="bubbleText" style="${bubbleStyle}">${text}</div></div>`);
+    botBuffer=[];
+  };
+
+  for(const it of items){
+    if(it.type==='info'){
+      flushBotBuffer();
+      const inner=escapeHtml(removeImageFilenames(it.text));
+      out.push(
+        `<details open style="margin:10px 0;padding:10px 12px;background:#181818;border-radius:8px;border:1px solid #333;">`+
+        `<summary style="font-weight:600;color:#ddd;cursor:pointer;">📖 장면 정보</summary>`+
+        `<pre style="white-space:pre-wrap;margin-top:8px;color:#ccc;font-family:inherit;background:#181818;padding:8px;border-radius:6px;">${inner}</pre>`+
+        `</details>`
+      );
+      continue;
+    }
+
+    if(it.type==='text'){ botBuffer.push(it.text); continue; }
+
+    if(it.type==='chat'){
+      const isUser = ((userName && it.sender === userName) || /\*\(.*\)\*/.test(it.sender) || /\)\*$/.test(it.sender));
+      if(isUser){
+        flushBotBuffer();
+        const senderHtml=`<div style="font-weight:700;font-size:0.95rem;margin-bottom:6px;color:#fff;">${escapeHtml(it.sender)}</div>`;
+        const userBubbleStyle='padding:12px 14px;border-radius:14px;white-space:pre-wrap;word-break:break-word;line-height:1.6;max-width:82%;box-shadow:0 2px 6px rgba(0,0,0,0.45);background:#B56576;color:#fff;border-top-right-radius:0;';
+        out.push(`<div style="display:flex;justify-content:flex-end;margin:10px 0;"><div class="bubbleText" style="${userBubbleStyle}">${senderHtml}${escapeHtml(it.text)}</div></div>`);
+      } else {
+        botBuffer.push(it.text);
+      }
+    }
+  }
+
+  flushBotBuffer();
+  out.push(`</div>`);
+  return out.join('\n');
+}
+
+/* ==================== UI 이벤트 ==================== */
+document.getElementById('loadSample').addEventListener('click',()=>{
+  const sample=[
+    `2025. 11. 8. 오후 2:12, 나 : 안녕하세요!`,
+    `2025. 11. 8. 오후 2:13, 리비 : "리비: 네, 반갑습니다, 주인님."`,
+    `|구분|게시판종류|제목(댓글수)|글쓴이|추천수|`,
+    `|:-:|:-:|:-|:-|:-:|`,
+    `|🔥|[자랑]|새로 들인 와일드, 너무 귀엽지 않냐? (12)|코코아|15|`,
+    `|🔥|[자랑]|아크급 경호원 앞발(?) 후기 (21)|ㅇㅇ(112.15)|11|`,
+    "```INFO",
+    "장면: 식당 내부",
+    "시간: 저녁",
+    "```"
+  ].join('\n');
+  document.getElementById('txt').value=sample;
+  document.getElementById('previewWrap').innerHTML='';
+  document.getElementById('outHtml').value='';
+});
+
+document.getElementById('file').addEventListener('change', (e)=>{
+  const f=e.target.files&&e.target.files[0];
+  if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{
+    document.getElementById('txt').value=r.result||'';
+    document.getElementById('previewWrap').innerHTML='';
+    document.getElementById('outHtml').value='';
+  };
+  r.readAsText(f,'utf-8');
+});
+
+document.getElementById('copyBtn').addEventListener('click', async ()=>{
+  const out=document.getElementById('outHtml').value||'';
+  if(!out.trim()){ alert('먼저 변환을 눌러 HTML을 생성하세요.'); return; }
+
+  try{
+    await navigator.clipboard.writeText(out);
+    const n=document.getElementById('copyNotice');
+    n.style.display='inline-block';
+    setTimeout(()=>n.style.display='none',1400);
+  }
+  catch(err){
+    alert('클립보드 복사에 실패했습니다. 수동으로 복사하세요.');
+  }
+});
+
+/* ===== 변환 버튼 이벤트 (상단 스타일 자동 삽입) ===== */
+document.getElementById('convert').addEventListener('click', ()=>{
+
+  console.clear();
+  console.log("🔍 변환 프로세스 디버그 시작");
+
+  const raw = document.getElementById('txt').value||'';
+  const userName = (document.getElementById('userName').value||'').trim();
+
+  // INFO 자동 종료 처리
+  let rawLines = raw.replace(/\r/g,'').split('\n');
+  rawLines = autoCloseInfoBlocks(rawLines, userName);
+  const processedRaw = rawLines.join('\n');
+
+  // 파싱
+  const items = parseTxtToItems(processedRaw);
+
+  // HTML 생성
+  let finalHtml = buildInlineHtml(items, userName);
+
+  // ======================== 상단 스타일 삽입 ========================
+  const styleCode = `<div>
+<style>
+  .bubbleText p {
+    color: inherit;
+  }
+</style>
+</div>\n`;
+  finalHtml = styleCode + finalHtml;
+  // =============================================================
+
+  document.getElementById('previewWrap').innerHTML = finalHtml;
+  document.getElementById('outHtml').value = finalHtml;
+});
+</script>
+
+</body>
+</html>
